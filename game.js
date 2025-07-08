@@ -10,6 +10,7 @@ const BALL_RADIUS = 10;
 const BALL_SPEED = 5;
 const PADDLE_SPEED = 8;
 const MAX_PLAYERS = 6;
+const COUNTDOWN_TIME = 3; // seconds
 
 // Game State
 let gameState = {
@@ -22,6 +23,8 @@ let gameState = {
         radius: BALL_RADIUS
     },
     gameStarted: false,
+    countdown: 0,
+    countdownStartTime: 0,
     scores: {}
 };
 
@@ -33,6 +36,11 @@ let myId = null;
 let myPeerId = null;
 let roomCode = null;
 let playerNumber = null;
+
+// Control State
+let keys = {};
+let mouseAngle = null;
+let useMouseControl = false;
 
 // DOM Elements
 const canvas = document.getElementById('gameCanvas');
@@ -47,6 +55,31 @@ canvas.height = CANVAS_SIZE;
 
 // Player Colors
 const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F'];
+
+// Setup input handlers
+window.addEventListener('keydown', (e) => { 
+    keys[e.key.toLowerCase()] = true;
+    e.preventDefault();
+});
+window.addEventListener('keyup', (e) => { 
+    keys[e.key.toLowerCase()] = false;
+    e.preventDefault();
+});
+
+// Mouse controls
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    // Calculate angle from center to mouse
+    mouseAngle = Math.atan2(y - CENTER_Y, x - CENTER_X);
+    useMouseControl = true;
+});
+
+canvas.addEventListener('mouseleave', () => {
+    useMouseControl = false;
+});
 
 // Create a new room
 document.getElementById('createRoom').addEventListener('click', () => {
@@ -112,7 +145,6 @@ document.getElementById('joinRoom').addEventListener('click', () => {
         console.log('My peer ID:', id);
         
         // Try to connect with the input (could be short code or full ID)
-        // For now, we'll assume it's the full peer ID
         attemptConnection(inputCode);
     });
     
@@ -244,8 +276,8 @@ function handleMessage(data, senderId) {
             }
             break;
             
-        case 'startGame':
-            startGame();
+        case 'startCountdown':
+            startCountdown();
             break;
             
         case 'ballUpdate':
@@ -279,6 +311,7 @@ function addPlayer(id, number) {
         id: id,
         number: number,
         angle: angle,
+        targetAngle: angle,
         score: 0,
         color: PLAYER_COLORS[number - 1]
     };
@@ -321,31 +354,55 @@ document.getElementById('startGame').addEventListener('click', () => {
         return;
     }
     
-    // Notify all players to start
+    // Notify all players to start countdown
     Object.values(connections).forEach(conn => {
-        conn.send({ type: 'startGame' });
+        conn.send({ type: 'startCountdown' });
     });
     
-    startGame();
+    startCountdown();
 });
 
-// Start the game
-function startGame() {
-    gameState.gameStarted = true;
+// Start countdown
+function startCountdown() {
+    gameState.countdown = COUNTDOWN_TIME;
+    gameState.countdownStartTime = Date.now();
     lobby.style.display = 'none';
     gameContainer.style.display = 'block';
     gameLoop();
 }
 
+// Start the game
+function startGame() {
+    gameState.gameStarted = true;
+    gameState.countdown = 0;
+    
+    // Reset ball position and give it a random direction
+    gameState.ball.x = CENTER_X;
+    gameState.ball.y = CENTER_Y;
+    const randomAngle = Math.random() * Math.PI * 2;
+    gameState.ball.vx = Math.cos(randomAngle) * BALL_SPEED;
+    gameState.ball.vy = Math.sin(randomAngle) * BALL_SPEED;
+}
+
 // Game loop
 function gameLoop() {
-    if (!gameState.gameStarted) return;
+    if (!gameState.gameStarted && gameState.countdown <= 0) return;
+    
+    // Update countdown
+    if (gameState.countdown > 0) {
+        const elapsed = (Date.now() - gameState.countdownStartTime) / 1000;
+        gameState.countdown = Math.max(0, COUNTDOWN_TIME - elapsed);
+        
+        if (gameState.countdown <= 0 && !gameState.gameStarted) {
+            startGame();
+        }
+    }
     
     // Handle input
     handleInput();
     
     // Update game state (only host updates ball)
-    if (isHost) {
+    if (isHost && gameState.gameStarted) {
         updateBall();
         // Broadcast ball position
         Object.values(connections).forEach(conn => {
@@ -364,27 +421,61 @@ function gameLoop() {
     requestAnimationFrame(gameLoop);
 }
 
-// Handle keyboard input
-let keys = {};
-window.addEventListener('keydown', (e) => { keys[e.key] = true; });
-window.addEventListener('keyup', (e) => { keys[e.key] = false; });
-
+// Handle keyboard and mouse input
 function handleInput() {
     const player = gameState.players[myId];
     if (!player) return;
     
+    let targetAngle = player.angle;
     let moved = false;
-    if (keys['ArrowLeft'] || keys['a']) {
-        player.angle -= PADDLE_SPEED * 0.01;
+    
+    // Mouse control takes priority
+    if (useMouseControl && mouseAngle !== null) {
+        targetAngle = mouseAngle;
         moved = true;
-    }
-    if (keys['ArrowRight'] || keys['d']) {
-        player.angle += PADDLE_SPEED * 0.01;
-        moved = true;
+    } else {
+        // Keyboard controls
+        if (keys['arrowleft'] || keys['a']) {
+            targetAngle = player.angle - PADDLE_SPEED * 0.02;
+            moved = true;
+        }
+        if (keys['arrowright'] || keys['d']) {
+            targetAngle = player.angle + PADDLE_SPEED * 0.02;
+            moved = true;
+        }
+        if (keys['arrowup'] || keys['w']) {
+            // Move to opposite side
+            targetAngle = player.angle + Math.PI;
+            moved = true;
+        }
+        if (keys['arrowdown'] || keys['s']) {
+            // Move to opposite side (other direction)
+            targetAngle = player.angle - Math.PI;
+            moved = true;
+        }
     }
     
-    // Broadcast paddle movement
+    // Smooth paddle movement
     if (moved) {
+        // Normalize angles
+        while (targetAngle > Math.PI) targetAngle -= Math.PI * 2;
+        while (targetAngle < -Math.PI) targetAngle += Math.PI * 2;
+        while (player.angle > Math.PI) player.angle -= Math.PI * 2;
+        while (player.angle < -Math.PI) player.angle += Math.PI * 2;
+        
+        // Calculate shortest angular distance
+        let diff = targetAngle - player.angle;
+        if (diff > Math.PI) diff -= Math.PI * 2;
+        if (diff < -Math.PI) diff += Math.PI * 2;
+        
+        // Apply movement
+        if (useMouseControl) {
+            player.angle = targetAngle; // Instant movement for mouse
+        } else {
+            player.angle += diff * 0.15; // Smooth movement for keyboard
+        }
+        
+        // Broadcast paddle movement
         Object.values(connections).forEach(conn => {
             if (conn.open) {
                 conn.send({
@@ -407,14 +498,25 @@ function updateBall() {
     // Check collision with paddles
     Object.values(gameState.players).forEach(player => {
         if (checkPaddleCollision(ball, player)) {
-            // Reflect ball
-            const angleToCenter = Math.atan2(ball.y - CENTER_Y, ball.x - CENTER_X);
-            ball.vx = Math.cos(angleToCenter) * BALL_SPEED;
-            ball.vy = Math.sin(angleToCenter) * BALL_SPEED;
+            // Calculate bounce angle based on where ball hits paddle
+            const paddleX = CENTER_X + Math.cos(player.angle) * PADDLE_DISTANCE;
+            const paddleY = CENTER_Y + Math.sin(player.angle) * PADDLE_DISTANCE;
             
-            // Move ball away from paddle
-            ball.x = CENTER_X + Math.cos(angleToCenter) * (PADDLE_DISTANCE - PADDLE_HEIGHT - ball.radius - 1);
-            ball.y = CENTER_Y + Math.sin(angleToCenter) * (PADDLE_DISTANCE - PADDLE_HEIGHT - ball.radius - 1);
+            // Get angle from paddle to ball
+            const angleFromPaddle = Math.atan2(ball.y - paddleY, ball.x - paddleX);
+            
+            // Add some spin based on paddle movement
+            const speed = BALL_SPEED * 1.05; // Slightly increase speed each hit
+            ball.vx = Math.cos(angleFromPaddle) * speed;
+            ball.vy = Math.sin(angleFromPaddle) * speed;
+            
+            // Move ball away from paddle to prevent multiple collisions
+            const distance = PADDLE_DISTANCE + PADDLE_HEIGHT / 2 + ball.radius + 2;
+            ball.x = CENTER_X + Math.cos(angleFromPaddle) * distance;
+            ball.y = CENTER_Y + Math.sin(angleFromPaddle) * distance;
+            
+            // Increase player score
+            player.score++;
         }
     });
     
@@ -435,9 +537,18 @@ function checkPaddleCollision(ball, player) {
     const paddleX = CENTER_X + Math.cos(player.angle) * PADDLE_DISTANCE;
     const paddleY = CENTER_Y + Math.sin(player.angle) * PADDLE_DISTANCE;
     
-    // Simple distance-based collision
-    const dist = Math.sqrt(Math.pow(ball.x - paddleX, 2) + Math.pow(ball.y - paddleY, 2));
-    return dist < PADDLE_WIDTH / 2 + ball.radius;
+    // Check if ball is near the paddle's angular position
+    const ballAngle = Math.atan2(ball.y - CENTER_Y, ball.x - CENTER_X);
+    let angleDiff = Math.abs(ballAngle - player.angle);
+    if (angleDiff > Math.PI) angleDiff = Math.PI * 2 - angleDiff;
+    
+    // Check if ball is at the right distance and angle
+    const distFromCenter = Math.sqrt(Math.pow(ball.x - CENTER_X, 2) + Math.pow(ball.y - CENTER_Y, 2));
+    const paddleAngleWidth = PADDLE_WIDTH / (2 * Math.PI * PADDLE_DISTANCE);
+    
+    return distFromCenter >= PADDLE_DISTANCE - PADDLE_HEIGHT &&
+           distFromCenter <= PADDLE_DISTANCE + PADDLE_HEIGHT &&
+           angleDiff < paddleAngleWidth;
 }
 
 // Render game
@@ -453,6 +564,20 @@ function render() {
     ctx.arc(CENTER_X, CENTER_Y, ARENA_RADIUS, 0, Math.PI * 2);
     ctx.stroke();
     
+    // Draw countdown if active
+    if (gameState.countdown > 0) {
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 72px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const countdownNumber = Math.ceil(gameState.countdown);
+        ctx.fillText(countdownNumber, CENTER_X, CENTER_Y);
+        
+        // Draw "Get Ready!" text
+        ctx.font = 'bold 24px Arial';
+        ctx.fillText('Get Ready!', CENTER_X, CENTER_Y + 60);
+    }
+    
     // Draw paddles
     Object.values(gameState.players).forEach(player => {
         const x = CENTER_X + Math.cos(player.angle) * PADDLE_DISTANCE;
@@ -463,14 +588,40 @@ function render() {
         ctx.rotate(player.angle + Math.PI / 2);
         ctx.fillStyle = player.color;
         ctx.fillRect(-PADDLE_WIDTH / 2, -PADDLE_HEIGHT / 2, PADDLE_WIDTH, PADDLE_HEIGHT);
+        
+        // Draw player number on paddle
+        ctx.fillStyle = '#000';
+        ctx.font = 'bold 16px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(player.number, 0, 0);
+        
         ctx.restore();
+        
+        // Draw score near paddle
+        if (gameState.gameStarted) {
+            ctx.fillStyle = player.color;
+            ctx.font = '20px Arial';
+            ctx.textAlign = 'center';
+            const scoreX = CENTER_X + Math.cos(player.angle) * (PADDLE_DISTANCE - 50);
+            const scoreY = CENTER_Y + Math.sin(player.angle) * (PADDLE_DISTANCE - 50);
+            ctx.fillText(player.score || 0, scoreX, scoreY);
+        }
     });
     
-    // Draw ball
-    ctx.fillStyle = '#fff';
-    ctx.beginPath();
-    ctx.arc(gameState.ball.x, gameState.ball.y, gameState.ball.radius, 0, Math.PI * 2);
-    ctx.fill();
+    // Draw ball (only if game started)
+    if (gameState.gameStarted) {
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(gameState.ball.x, gameState.ball.y, gameState.ball.radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    
+    // Draw controls hint
+    ctx.fillStyle = '#666';
+    ctx.font = '14px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Controls: WASD / Arrow Keys / Mouse', CENTER_X, CANVAS_SIZE - 20);
 }
 
 // Update status message
@@ -481,6 +632,7 @@ function updateStatus(message) {
 // Back to lobby button
 document.getElementById('backToLobby').addEventListener('click', () => {
     gameState.gameStarted = false;
+    gameState.countdown = 0;
     gameContainer.style.display = 'none';
     lobby.style.display = 'block';
 });
@@ -502,6 +654,8 @@ document.getElementById('leaveRoom').addEventListener('click', () => {
             radius: BALL_RADIUS
         },
         gameStarted: false,
+        countdown: 0,
+        countdownStartTime: 0,
         scores: {}
     };
     
@@ -516,6 +670,11 @@ document.getElementById('leaveRoom').addEventListener('click', () => {
         peer.destroy();
         peer = null;
     }
+    
+    // Reset control state
+    keys = {};
+    mouseAngle = null;
+    useMouseControl = false;
     
     isHost = false;
     myId = null;
