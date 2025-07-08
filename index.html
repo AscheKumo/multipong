@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Circular Pong - P2P Multiplayer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            color: #fff;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        
+        #gameContainer {
+            position: relative;
+            display: none;
+        }
+        
+        canvas {
+            border: 2px solid #fff;
+            border-radius: 50%;
+        }
+        
+        #lobby {
+            text-align: center;
+            max-width: 600px;
+            padding: 20px;
+        }
+        
+        input, button {
+            margin: 10px;
+            padding: 10px;
+            font-size: 16px;
+        }
+        
+        #roomCode {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 20px;
+            padding: 10px;
+            background: #333;
+            border-radius: 5px;
+        }
+        
+        #playersList {
+            margin: 20px 0;
+        }
+        
+        .player-slot {
+            margin: 5px;
+            padding: 5px 10px;
+            background: #222;
+            border-radius: 3px;
+            display: inline-block;
+        }
+        
+        .player-slot.active {
+            background: #4CAF50;
+        }
+        
+        #status {
+            margin: 10px;
+            padding: 10px;
+            background: #111;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="lobby">
+        <h1>Circular Pong - P2P Multiplayer</h1>
+        <p>Play circular pong with up to 6 players using peer-to-peer connections!</p>
+        
+        <div id="startOptions">
+            <button id="createRoom">Create Room</button>
+            <div>
+                <input type="text" id="joinCode" placeholder="Enter room code">
+                <button id="joinRoom">Join Room</button>
+            </div>
+        </div>
+        
+        <div id="roomInfo" style="display: none;">
+            <div id="roomCode"></div>
+            <div id="playersList"></div>
+            <button id="startGame" style="display: none;">Start Game</button>
+            <button id="leaveRoom">Leave Room</button>
+        </div>
+        
+        <div id="status"></div>
+    </div>
+    
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+        <button id="backToLobby" style="position: absolute; top: 10px; right: 10px;">Back to Lobby</button>
+    </div>
+    
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>
