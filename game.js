@@ -30,6 +30,7 @@ let peer = null;
 let connections = {};
 let isHost = false;
 let myId = null;
+let myPeerId = null;
 let roomCode = null;
 let playerNumber = null;
 
@@ -51,74 +52,106 @@ const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#
 document.getElementById('createRoom').addEventListener('click', () => {
     updateStatus('Creating room...');
     
-    // Generate a random room code
-    roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-    
-    // Initialize peer with the room code as ID
-    peer = new Peer(roomCode);
+    // Create peer with auto-generated ID
+    peer = new Peer();
     
     peer.on('open', (id) => {
+        myPeerId = id;
         myId = id;
         isHost = true;
+        
+        // Create a short room code from the peer ID
+        roomCode = id.slice(-6).toUpperCase();
+        
         playerNumber = 1;
         addPlayer(myId, playerNumber);
         showGameRoom();
+        
+        // Show the full peer ID in console for debugging
+        console.log('Room created with peer ID:', id);
         updateStatus('Room created! Share the code with friends.');
+        
+        // Update room code display with full ID for now
+        document.getElementById('roomCode').innerHTML = `
+            <div>Room Code (short): <strong>${roomCode}</strong></div>
+            <div style="font-size: 12px; margin-top: 10px;">
+                Full ID (for troubleshooting): <br>
+                <code style="background: #222; padding: 5px; border-radius: 3px; word-break: break-all;">${id}</code>
+            </div>
+        `;
     });
     
     peer.on('connection', handleConnection);
     
     peer.on('error', (err) => {
         updateStatus(`Error: ${err.type} - ${err.message}`);
-        console.error(err);
+        console.error('PeerJS Error:', err);
+    });
+    
+    peer.on('disconnected', () => {
+        updateStatus('Disconnected from signaling server');
     });
 });
 
 // Join a room
 document.getElementById('joinRoom').addEventListener('click', () => {
-    const code = document.getElementById('joinCode').value.trim().toUpperCase();
-    if (!code) {
-        updateStatus('Please enter a room code');
+    const inputCode = document.getElementById('joinCode').value.trim();
+    if (!inputCode) {
+        updateStatus('Please enter a room code or peer ID');
         return;
     }
     
-    updateStatus('Joining room...');
+    updateStatus('Connecting to room...');
     
-    // Create peer with random ID
+    // Create peer with auto-generated ID
     peer = new Peer();
     
     peer.on('open', (id) => {
+        myPeerId = id;
         myId = id;
+        console.log('My peer ID:', id);
         
-        // Connect to host using room code as peer ID
-        const conn = peer.connect(code);
-        
-        conn.on('open', () => {
-            connections[code] = conn;
-            roomCode = code;
-            setupConnectionHandlers(conn);
-            updateStatus('Connected to room!');
-        });
-        
-        conn.on('error', (err) => {
-            updateStatus('Failed to connect to room - check the code and try again');
-            console.error(err);
-        });
+        // Try to connect with the input (could be short code or full ID)
+        // For now, we'll assume it's the full peer ID
+        attemptConnection(inputCode);
     });
     
     peer.on('connection', handleConnection);
     
     peer.on('error', (err) => {
         updateStatus(`Error: ${err.type} - ${err.message}`);
-        console.error(err);
+        console.error('PeerJS Error:', err);
     });
 });
+
+// Attempt to connect to host
+function attemptConnection(hostId) {
+    console.log('Attempting to connect to:', hostId);
+    
+    const conn = peer.connect(hostId, {
+        reliable: true
+    });
+    
+    conn.on('open', () => {
+        console.log('Connection opened to host');
+        connections[hostId] = conn;
+        roomCode = hostId.slice(-6).toUpperCase();
+        setupConnectionHandlers(conn);
+        updateStatus('Connected to room! Waiting for host...');
+    });
+    
+    conn.on('error', (err) => {
+        updateStatus('Failed to connect - make sure you have the correct code');
+        console.error('Connection error:', err);
+    });
+}
 
 // Handle incoming connections
 function handleConnection(conn) {
     console.log('Incoming connection from:', conn.peer);
     
     conn.on('open', () => {
+        console.log('Connection opened from:', conn.peer);
         connections[conn.peer] = conn;
         
         if (isHost) {
@@ -130,7 +163,10 @@ function handleConnection(conn) {
             }
             
             if (newPlayerNumber <= MAX_PLAYERS) {
-                // Send current game state to new player
+                // Add new player to game state first
+                addPlayer(conn.peer, newPlayerNumber);
+                
+                // Send welcome message with game state
                 conn.send({
                     type: 'welcome',
                     playerNumber: newPlayerNumber,
@@ -138,12 +174,9 @@ function handleConnection(conn) {
                     isHost: false
                 });
                 
-                // Add new player to game state
-                addPlayer(conn.peer, newPlayerNumber);
-                
-                // Broadcast updated player list
-                broadcastGameState();
+                // Update UI and broadcast to other players
                 updatePlayersList();
+                broadcastGameState();
             } else {
                 conn.send({ type: 'roomFull' });
                 setTimeout(() => conn.close(), 100);
@@ -161,10 +194,12 @@ function handleConnection(conn) {
 // Setup message handlers for a connection
 function setupConnectionHandlers(conn) {
     conn.on('data', (data) => {
+        console.log('Received data:', data.type);
         handleMessage(data, conn.peer);
     });
     
     conn.on('close', () => {
+        console.log('Connection closed:', conn.peer);
         delete connections[conn.peer];
         if (gameState.players[conn.peer]) {
             delete gameState.players[conn.peer];
@@ -190,10 +225,16 @@ function handleMessage(data, senderId) {
             addPlayer(myId, playerNumber);
             updatePlayersList();
             showGameRoom();
+            updateStatus('Joined room successfully!');
             break;
             
         case 'gameState':
+            // Update other players, but keep our own player data
+            const myPlayer = gameState.players[myId];
             gameState = data.gameState;
+            if (myPlayer) {
+                gameState.players[myId] = myPlayer;
+            }
             updatePlayersList();
             break;
             
@@ -223,7 +264,6 @@ function handleMessage(data, senderId) {
 function showGameRoom() {
     document.getElementById('startOptions').style.display = 'none';
     document.getElementById('roomInfo').style.display = 'block';
-    document.getElementById('roomCode').textContent = `Room Code: ${roomCode}`;
     
     if (isHost) {
         document.getElementById('startGame').style.display = 'block';
@@ -469,6 +509,7 @@ document.getElementById('leaveRoom').addEventListener('click', () => {
     document.getElementById('roomInfo').style.display = 'none';
     document.getElementById('startOptions').style.display = 'block';
     document.getElementById('joinCode').value = '';
+    document.getElementById('roomCode').textContent = '';
     
     // Destroy peer connection
     if (peer) {
@@ -478,6 +519,7 @@ document.getElementById('leaveRoom').addEventListener('click', () => {
     
     isHost = false;
     myId = null;
+    myPeerId = null;
     roomCode = null;
     playerNumber = null;
     
