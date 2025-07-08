@@ -34,10 +34,19 @@
             padding: 20px;
         }
         
-        input, button {
+        input, button, select {
             margin: 10px;
             padding: 10px;
             font-size: 16px;
+            background: #222;
+            color: #fff;
+            border: 1px solid #444;
+            border-radius: 5px;
+        }
+        
+        button:hover {
+            background: #333;
+            cursor: pointer;
         }
         
         #roomCode {
@@ -71,6 +80,40 @@
             background: #111;
             border-radius: 5px;
         }
+        
+        .game-settings {
+            margin: 20px 0;
+            padding: 20px;
+            background: #111;
+            border-radius: 10px;
+        }
+        
+        .setting-row {
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        
+        .setting-row label {
+            min-width: 150px;
+            text-align: right;
+        }
+        
+        .scoreboard {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.8);
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #333;
+        }
+        
+        .score-entry {
+            margin: 5px 0;
+        }
     </style>
 </head>
 <body>
@@ -89,6 +132,37 @@
         <div id="roomInfo" style="display: none;">
             <div id="roomCode"></div>
             <div id="playersList"></div>
+            
+            <div class="game-settings" id="gameSettings">
+                <h3>Game Settings</h3>
+                <div class="setting-row">
+                    <label>Points to Win:</label>
+                    <select id="pointsToWin">
+                        <option value="5">5</option>
+                        <option value="10" selected>10</option>
+                        <option value="15">15</option>
+                        <option value="20">20</option>
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <label>Ball Speed:</label>
+                    <select id="ballSpeedSetting">
+                        <option value="3">Slow</option>
+                        <option value="5" selected>Normal</option>
+                        <option value="7">Fast</option>
+                        <option value="10">Insane</option>
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <label>Paddle Size:</label>
+                    <select id="paddleSizeSetting">
+                        <option value="60">Small</option>
+                        <option value="80" selected>Normal</option>
+                        <option value="100">Large</option>
+                    </select>
+                </div>
+            </div>
+            
             <button id="startGame" style="display: none;">Start Game</button>
             <button id="leaveRoom">Leave Room</button>
         </div>
@@ -98,6 +172,7 @@
     
     <div id="gameContainer">
         <canvas id="gameCanvas"></canvas>
+        <div class="scoreboard" id="scoreboard"></div>
         <button id="backToLobby" style="position: absolute; top: 10px; right: 10px;">Back to Lobby</button>
     </div>
     
