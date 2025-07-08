@@ -3,14 +3,19 @@ const CANVAS_SIZE = 600;
 const CENTER_X = CANVAS_SIZE / 2;
 const CENTER_Y = CANVAS_SIZE / 2;
 const ARENA_RADIUS = 280;
-const PADDLE_WIDTH = 80;
-const PADDLE_HEIGHT = 20;
-const PADDLE_DISTANCE = ARENA_RADIUS + 30;
-const BALL_RADIUS = 10;
-const BALL_SPEED = 5;
-const PADDLE_SPEED = 8;
+const PADDLE_HEIGHT = 15;
+const BALL_RADIUS = 8;
+const PADDLE_SPEED = 0.05;
 const MAX_PLAYERS = 6;
-const COUNTDOWN_TIME = 3; // seconds
+const COUNTDOWN_TIME = 3;
+const GAP_SIZE = 20; // Gap size where ball can pass through
+
+// Game Settings (can be modified by host)
+let gameSettings = {
+    pointsToWin: 10,
+    ballSpeed: 5,
+    paddleWidth: 80
+};
 
 // Game State
 let gameState = {
@@ -18,14 +23,16 @@ let gameState = {
     ball: {
         x: CENTER_X,
         y: CENTER_Y,
-        vx: BALL_SPEED,
-        vy: BALL_SPEED,
-        radius: BALL_RADIUS
+        vx: 0,
+        vy: 0,
+        radius: BALL_RADIUS,
+        lastHitBy: null
     },
     gameStarted: false,
     countdown: 0,
     countdownStartTime: 0,
-    scores: {}
+    scores: {},
+    winner: null
 };
 
 // Network State
@@ -39,7 +46,8 @@ let playerNumber = null;
 
 // Control State
 let keys = {};
-let mouseAngle = null;
+let mouseX = null;
+let mouseY = null;
 let useMouseControl = false;
 
 // DOM Elements
@@ -48,6 +56,7 @@ const ctx = canvas.getContext('2d');
 const lobby = document.getElementById('lobby');
 const gameContainer = document.getElementById('gameContainer');
 const statusDiv = document.getElementById('status');
+const scoreboard = document.getElementById('scoreboard');
 
 // Initialize Canvas
 canvas.width = CANVAS_SIZE;
@@ -59,21 +68,18 @@ const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#
 // Setup input handlers
 window.addEventListener('keydown', (e) => { 
     keys[e.key.toLowerCase()] = true;
-    e.preventDefault();
+    if (gameState.gameStarted) e.preventDefault();
 });
 window.addEventListener('keyup', (e) => { 
     keys[e.key.toLowerCase()] = false;
-    e.preventDefault();
+    if (gameState.gameStarted) e.preventDefault();
 });
 
 // Mouse controls
 canvas.addEventListener('mousemove', (e) => {
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    // Calculate angle from center to mouse
-    mouseAngle = Math.atan2(y - CENTER_Y, x - CENTER_X);
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top;
     useMouseControl = true;
 });
 
@@ -81,11 +87,46 @@ canvas.addEventListener('mouseleave', () => {
     useMouseControl = false;
 });
 
+// Settings change handlers (host only)
+document.getElementById('pointsToWin').addEventListener('change', (e) => {
+    if (isHost) {
+        gameSettings.pointsToWin = parseInt(e.target.value);
+        broadcastSettings();
+    }
+});
+
+document.getElementById('ballSpeedSetting').addEventListener('change', (e) => {
+    if (isHost) {
+        gameSettings.ballSpeed = parseInt(e.target.value);
+        broadcastSettings();
+    }
+});
+
+document.getElementById('paddleSizeSetting').addEventListener('change', (e) => {
+    if (isHost) {
+        gameSettings.paddleWidth = parseInt(e.target.value);
+        broadcastSettings();
+    }
+});
+
+// Broadcast settings to all players
+function broadcastSettings() {
+    const message = {
+        type: 'settingsUpdate',
+        settings: gameSettings
+    };
+    
+    Object.values(connections).forEach(conn => {
+        if (conn.open) {
+            conn.send(message);
+        }
+    });
+}
+
 // Create a new room
 document.getElementById('createRoom').addEventListener('click', () => {
     updateStatus('Creating room...');
     
-    // Create peer with auto-generated ID
     peer = new Peer();
     
     peer.on('open', (id) => {
@@ -93,23 +134,19 @@ document.getElementById('createRoom').addEventListener('click', () => {
         myId = id;
         isHost = true;
         
-        // Create a short room code from the peer ID
         roomCode = id.slice(-6).toUpperCase();
         
         playerNumber = 1;
         addPlayer(myId, playerNumber);
         showGameRoom();
         
-        // Show the full peer ID in console for debugging
         console.log('Room created with peer ID:', id);
         updateStatus('Room created! Share the code with friends.');
         
-        // Update room code display with full ID for now
         document.getElementById('roomCode').innerHTML = `
             <div>Room Code (short): <strong>${roomCode}</strong></div>
             <div style="font-size: 12px; margin-top: 10px;">
-                Full ID (for troubleshooting): <br>
-                <code style="background: #222; padding: 5px; border-radius: 3px; word-break: break-all;">${id}</code>
+                Full ID: <code style="background: #222; padding: 5px; border-radius: 3px; word-break: break-all;">${id}</code>
             </div>
         `;
     });
@@ -119,10 +156,6 @@ document.getElementById('createRoom').addEventListener('click', () => {
     peer.on('error', (err) => {
         updateStatus(`Error: ${err.type} - ${err.message}`);
         console.error('PeerJS Error:', err);
-    });
-    
-    peer.on('disconnected', () => {
-        updateStatus('Disconnected from signaling server');
     });
 });
 
@@ -136,15 +169,11 @@ document.getElementById('joinRoom').addEventListener('click', () => {
     
     updateStatus('Connecting to room...');
     
-    // Create peer with auto-generated ID
     peer = new Peer();
     
     peer.on('open', (id) => {
         myPeerId = id;
         myId = id;
-        console.log('My peer ID:', id);
-        
-        // Try to connect with the input (could be short code or full ID)
         attemptConnection(inputCode);
     });
     
@@ -158,14 +187,11 @@ document.getElementById('joinRoom').addEventListener('click', () => {
 
 // Attempt to connect to host
 function attemptConnection(hostId) {
-    console.log('Attempting to connect to:', hostId);
-    
     const conn = peer.connect(hostId, {
         reliable: true
     });
     
     conn.on('open', () => {
-        console.log('Connection opened to host');
         connections[hostId] = conn;
         roomCode = hostId.slice(-6).toUpperCase();
         setupConnectionHandlers(conn);
@@ -173,21 +199,17 @@ function attemptConnection(hostId) {
     });
     
     conn.on('error', (err) => {
-        updateStatus('Failed to connect - make sure you have the correct code');
+        updateStatus('Failed to connect - check the code and try again');
         console.error('Connection error:', err);
     });
 }
 
 // Handle incoming connections
 function handleConnection(conn) {
-    console.log('Incoming connection from:', conn.peer);
-    
     conn.on('open', () => {
-        console.log('Connection opened from:', conn.peer);
         connections[conn.peer] = conn;
         
         if (isHost) {
-            // Assign player number to new player
             const usedNumbers = Object.values(gameState.players).map(p => p.number);
             let newPlayerNumber = 1;
             while (usedNumbers.includes(newPlayerNumber) && newPlayerNumber <= MAX_PLAYERS) {
@@ -195,18 +217,16 @@ function handleConnection(conn) {
             }
             
             if (newPlayerNumber <= MAX_PLAYERS) {
-                // Add new player to game state first
                 addPlayer(conn.peer, newPlayerNumber);
                 
-                // Send welcome message with game state
                 conn.send({
                     type: 'welcome',
                     playerNumber: newPlayerNumber,
                     gameState: gameState,
+                    gameSettings: gameSettings,
                     isHost: false
                 });
                 
-                // Update UI and broadcast to other players
                 updatePlayersList();
                 broadcastGameState();
             } else {
@@ -217,21 +237,15 @@ function handleConnection(conn) {
         
         setupConnectionHandlers(conn);
     });
-    
-    conn.on('error', (err) => {
-        console.error('Connection error:', err);
-    });
 }
 
 // Setup message handlers for a connection
 function setupConnectionHandlers(conn) {
     conn.on('data', (data) => {
-        console.log('Received data:', data.type);
         handleMessage(data, conn.peer);
     });
     
     conn.on('close', () => {
-        console.log('Connection closed:', conn.peer);
         delete connections[conn.peer];
         if (gameState.players[conn.peer]) {
             delete gameState.players[conn.peer];
@@ -241,10 +255,6 @@ function setupConnectionHandlers(conn) {
             }
         }
     });
-    
-    conn.on('error', (err) => {
-        console.error('Connection error:', err);
-    });
 }
 
 // Handle incoming messages
@@ -253,6 +263,7 @@ function handleMessage(data, senderId) {
         case 'welcome':
             playerNumber = data.playerNumber;
             gameState = data.gameState;
+            gameSettings = data.gameSettings;
             isHost = data.isHost;
             addPlayer(myId, playerNumber);
             updatePlayersList();
@@ -261,7 +272,6 @@ function handleMessage(data, senderId) {
             break;
             
         case 'gameState':
-            // Update other players, but keep our own player data
             const myPlayer = gameState.players[myId];
             gameState = data.gameState;
             if (myPlayer) {
@@ -270,9 +280,14 @@ function handleMessage(data, senderId) {
             updatePlayersList();
             break;
             
+        case 'settingsUpdate':
+            gameSettings = data.settings;
+            updateSettingsDisplay();
+            break;
+            
         case 'paddleMove':
             if (gameState.players[senderId]) {
-                gameState.players[senderId].angle = data.angle;
+                gameState.players[senderId].paddlePosition = data.position;
             }
             break;
             
@@ -281,15 +296,20 @@ function handleMessage(data, senderId) {
             break;
             
         case 'ballUpdate':
-            if (!isHost) { // Only accept ball updates from host
+            if (!isHost) {
                 gameState.ball = data.ball;
+                gameState.scores = data.scores;
+                gameState.winner = data.winner;
             }
             break;
-            
-        case 'roomFull':
-            updateStatus('Room is full!');
-            break;
     }
+}
+
+// Update settings display
+function updateSettingsDisplay() {
+    document.getElementById('pointsToWin').value = gameSettings.pointsToWin;
+    document.getElementById('ballSpeedSetting').value = gameSettings.ballSpeed;
+    document.getElementById('paddleSizeSetting').value = gameSettings.paddleWidth;
 }
 
 // Show game room UI
@@ -299,6 +319,9 @@ function showGameRoom() {
     
     if (isHost) {
         document.getElementById('startGame').style.display = 'block';
+        document.getElementById('gameSettings').style.display = 'block';
+    } else {
+        document.getElementById('gameSettings').style.display = 'none';
     }
     
     updatePlayersList();
@@ -306,16 +329,36 @@ function showGameRoom() {
 
 // Add player to game
 function addPlayer(id, number) {
-    const angle = (number - 1) * (Math.PI * 2 / MAX_PLAYERS);
+    const playerCount = Object.keys(gameState.players).length + 1;
+    const sectionAngle = (Math.PI * 2) / playerCount;
+    const startAngle = (number - 1) * sectionAngle;
+    
     gameState.players[id] = {
         id: id,
         number: number,
-        angle: angle,
-        targetAngle: angle,
-        score: 0,
-        color: PLAYER_COLORS[number - 1]
+        startAngle: startAngle,
+        endAngle: startAngle + sectionAngle,
+        paddlePosition: 0.5, // 0 to 1, position within their section
+        color: PLAYER_COLORS[number - 1],
+        score: 0
     };
+    
+    // Recalculate all player sections
+    recalculatePlayerSections();
+    
+    // Initialize score
     gameState.scores[id] = 0;
+}
+
+// Recalculate player sections when players join/leave
+function recalculatePlayerSections() {
+    const playerCount = Object.keys(gameState.players).length;
+    const sectionAngle = (Math.PI * 2) / playerCount;
+    
+    Object.values(gameState.players).forEach((player, index) => {
+        player.startAngle = index * sectionAngle - Math.PI / 2;
+        player.endAngle = (index + 1) * sectionAngle - Math.PI / 2;
+    });
 }
 
 // Update players list UI
@@ -323,14 +366,13 @@ function updatePlayersList() {
     const playersList = document.getElementById('playersList');
     playersList.innerHTML = '<h3>Players:</h3>';
     
-    for (let i = 1; i <= MAX_PLAYERS; i++) {
-        const player = Object.values(gameState.players).find(p => p.number === i);
+    Object.values(gameState.players).forEach(player => {
         const div = document.createElement('div');
-        div.className = 'player-slot' + (player ? ' active' : '');
-        div.textContent = player ? `Player ${i}` + (player.id === myId ? ' (You)' : '') : `Empty Slot ${i}`;
-        div.style.borderColor = PLAYER_COLORS[i - 1];
+        div.className = 'player-slot active';
+        div.textContent = `Player ${player.number}` + (player.id === myId ? ' (You)' : '');
+        div.style.backgroundColor = player.color;
         playersList.appendChild(div);
-    }
+    });
 }
 
 // Broadcast game state to all connections
@@ -354,7 +396,6 @@ document.getElementById('startGame').addEventListener('click', () => {
         return;
     }
     
-    // Notify all players to start countdown
     Object.values(connections).forEach(conn => {
         conn.send({ type: 'startCountdown' });
     });
@@ -368,6 +409,13 @@ function startCountdown() {
     gameState.countdownStartTime = Date.now();
     lobby.style.display = 'none';
     gameContainer.style.display = 'block';
+    
+    // Reset scores
+    Object.keys(gameState.scores).forEach(id => {
+        gameState.scores[id] = 0;
+    });
+    
+    updateScoreboard();
     gameLoop();
 }
 
@@ -375,18 +423,38 @@ function startCountdown() {
 function startGame() {
     gameState.gameStarted = true;
     gameState.countdown = 0;
+    gameState.winner = null;
     
-    // Reset ball position and give it a random direction
+    // Reset ball
     gameState.ball.x = CENTER_X;
     gameState.ball.y = CENTER_Y;
     const randomAngle = Math.random() * Math.PI * 2;
-    gameState.ball.vx = Math.cos(randomAngle) * BALL_SPEED;
-    gameState.ball.vy = Math.sin(randomAngle) * BALL_SPEED;
+    gameState.ball.vx = Math.cos(randomAngle) * gameSettings.ballSpeed;
+    gameState.ball.vy = Math.sin(randomAngle) * gameSettings.ballSpeed;
+    gameState.ball.lastHitBy = null;
+}
+
+// Update scoreboard
+function updateScoreboard() {
+    let html = '<h3>Scores</h3>';
+    Object.values(gameState.players).forEach(player => {
+        const score = gameState.scores[player.id] || 0;
+        html += `<div class="score-entry" style="color: ${player.color}">
+            Player ${player.number}: ${score}/${gameSettings.pointsToWin}
+        </div>`;
+    });
+    
+    if (gameState.winner) {
+        const winner = gameState.players[gameState.winner];
+        html += `<h2 style="color: ${winner.color}">Player ${winner.number} Wins!</h2>`;
+    }
+    
+    scoreboard.innerHTML = html;
 }
 
 // Game loop
 function gameLoop() {
-    if (!gameState.gameStarted && gameState.countdown <= 0) return;
+    if (!gameState.gameStarted && gameState.countdown <= 0 && !gameState.winner) return;
     
     // Update countdown
     if (gameState.countdown > 0) {
@@ -399,21 +467,37 @@ function gameLoop() {
     }
     
     // Handle input
-    handleInput();
+    if (gameState.gameStarted && !gameState.winner) {
+        handleInput();
+    }
     
     // Update game state (only host updates ball)
-    if (isHost && gameState.gameStarted) {
+    if (isHost && gameState.gameStarted && !gameState.winner) {
         updateBall();
-        // Broadcast ball position
+        
+        // Check for winner
+        Object.entries(gameState.scores).forEach(([playerId, score]) => {
+            if (score >= gameSettings.pointsToWin) {
+                gameState.winner = playerId;
+                gameState.gameStarted = false;
+            }
+        });
+        
+        // Broadcast game state
         Object.values(connections).forEach(conn => {
             if (conn.open) {
                 conn.send({
                     type: 'ballUpdate',
-                    ball: gameState.ball
+                    ball: gameState.ball,
+                    scores: gameState.scores,
+                    winner: gameState.winner
                 });
             }
         });
     }
+    
+    // Update scoreboard
+    updateScoreboard();
     
     // Render game
     render();
@@ -426,61 +510,51 @@ function handleInput() {
     const player = gameState.players[myId];
     if (!player) return;
     
-    let targetAngle = player.angle;
+    let newPosition = player.paddlePosition;
     let moved = false;
     
-    // Mouse control takes priority
-    if (useMouseControl && mouseAngle !== null) {
-        targetAngle = mouseAngle;
-        moved = true;
+    // Calculate the angular range of player's section
+    const sectionAngle = player.endAngle - player.startAngle;
+    
+    if (useMouseControl && mouseX !== null && mouseY !== null) {
+        // Convert mouse position to angle
+        const mouseAngle = Math.atan2(mouseY - CENTER_Y, mouseX - CENTER_X);
+        
+        // Normalize angles
+        let normalizedMouseAngle = mouseAngle;
+        let normalizedStartAngle = player.startAngle;
+        
+        while (normalizedMouseAngle < normalizedStartAngle) {
+            normalizedMouseAngle += Math.PI * 2;
+        }
+        
+        // Calculate position within section (0 to 1)
+        const angleWithinSection = normalizedMouseAngle - normalizedStartAngle;
+        if (angleWithinSection >= 0 && angleWithinSection <= sectionAngle) {
+            newPosition = angleWithinSection / sectionAngle;
+            moved = true;
+        }
     } else {
         // Keyboard controls
         if (keys['arrowleft'] || keys['a']) {
-            targetAngle = player.angle - PADDLE_SPEED * 0.02;
+            newPosition = Math.max(0, player.paddlePosition - PADDLE_SPEED);
             moved = true;
         }
         if (keys['arrowright'] || keys['d']) {
-            targetAngle = player.angle + PADDLE_SPEED * 0.02;
-            moved = true;
-        }
-        if (keys['arrowup'] || keys['w']) {
-            // Move to opposite side
-            targetAngle = player.angle + Math.PI;
-            moved = true;
-        }
-        if (keys['arrowdown'] || keys['s']) {
-            // Move to opposite side (other direction)
-            targetAngle = player.angle - Math.PI;
+            newPosition = Math.min(1, player.paddlePosition + PADDLE_SPEED);
             moved = true;
         }
     }
     
-    // Smooth paddle movement
-    if (moved) {
-        // Normalize angles
-        while (targetAngle > Math.PI) targetAngle -= Math.PI * 2;
-        while (targetAngle < -Math.PI) targetAngle += Math.PI * 2;
-        while (player.angle > Math.PI) player.angle -= Math.PI * 2;
-        while (player.angle < -Math.PI) player.angle += Math.PI * 2;
+    // Update position and broadcast
+    if (moved && newPosition !== player.paddlePosition) {
+        player.paddlePosition = newPosition;
         
-        // Calculate shortest angular distance
-        let diff = targetAngle - player.angle;
-        if (diff > Math.PI) diff -= Math.PI * 2;
-        if (diff < -Math.PI) diff += Math.PI * 2;
-        
-        // Apply movement
-        if (useMouseControl) {
-            player.angle = targetAngle; // Instant movement for mouse
-        } else {
-            player.angle += diff * 0.15; // Smooth movement for keyboard
-        }
-        
-        // Broadcast paddle movement
         Object.values(connections).forEach(conn => {
             if (conn.open) {
                 conn.send({
                     type: 'paddleMove',
-                    angle: player.angle
+                    position: player.paddlePosition
                 });
             }
         });
@@ -495,60 +569,106 @@ function updateBall() {
     ball.x += ball.vx;
     ball.y += ball.vy;
     
-    // Check collision with paddles
-    Object.values(gameState.players).forEach(player => {
-        if (checkPaddleCollision(ball, player)) {
-            // Calculate bounce angle based on where ball hits paddle
-            const paddleX = CENTER_X + Math.cos(player.angle) * PADDLE_DISTANCE;
-            const paddleY = CENTER_Y + Math.sin(player.angle) * PADDLE_DISTANCE;
-            
-            // Get angle from paddle to ball
-            const angleFromPaddle = Math.atan2(ball.y - paddleY, ball.x - paddleX);
-            
-            // Add some spin based on paddle movement
-            const speed = BALL_SPEED * 1.05; // Slightly increase speed each hit
-            ball.vx = Math.cos(angleFromPaddle) * speed;
-            ball.vy = Math.sin(angleFromPaddle) * speed;
-            
-            // Move ball away from paddle to prevent multiple collisions
-            const distance = PADDLE_DISTANCE + PADDLE_HEIGHT / 2 + ball.radius + 2;
-            ball.x = CENTER_X + Math.cos(angleFromPaddle) * distance;
-            ball.y = CENTER_Y + Math.sin(angleFromPaddle) * distance;
-            
-            // Increase player score
-            player.score++;
-        }
-    });
-    
-    // Check if ball is out of bounds
+    // Check distance from center
     const distFromCenter = Math.sqrt(Math.pow(ball.x - CENTER_X, 2) + Math.pow(ball.y - CENTER_Y, 2));
-    if (distFromCenter > ARENA_RADIUS + 50) {
-        // Reset ball
-        ball.x = CENTER_X;
-        ball.y = CENTER_Y;
-        const randomAngle = Math.random() * Math.PI * 2;
-        ball.vx = Math.cos(randomAngle) * BALL_SPEED;
-        ball.vy = Math.sin(randomAngle) * BALL_SPEED;
+    
+    // Check collision with paddles at arena edge
+    if (distFromCenter >= ARENA_RADIUS - PADDLE_HEIGHT - ball.radius && 
+        distFromCenter <= ARENA_RADIUS + ball.radius) {
+        
+        const ballAngle = Math.atan2(ball.y - CENTER_Y, ball.x - CENTER_X);
+        
+        // Check which player's section the ball is in
+        let hitPaddle = false;
+        Object.values(gameState.players).forEach(player => {
+            if (isAngleInPlayerSection(ballAngle, player)) {
+                // Check if paddle is at this position
+                const paddleAngle = getPaddleAngle(player);
+                const paddleArcLength = (gameSettings.paddleWidth / ARENA_RADIUS);
+                
+                let angleDiff = Math.abs(ballAngle - paddleAngle);
+                if (angleDiff > Math.PI) angleDiff = Math.PI * 2 - angleDiff;
+                
+                if (angleDiff < paddleArcLength / 2) {
+                    // Hit paddle!
+                    hitPaddle = true;
+                    
+                    // Calculate bounce angle
+                    const normal = Math.atan2(ball.y - CENTER_Y, ball.x - CENTER_X);
+                    const incoming = Math.atan2(ball.vy, ball.vx);
+                    const bounceAngle = 2 * normal - incoming + Math.PI;
+                    
+                    // Add some spin based on where the ball hit the paddle
+                    const hitOffset = (angleDiff / (paddleArcLength / 2));
+                    const spin = hitOffset * 0.5;
+                    
+                    const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy) * 1.05;
+                    ball.vx = Math.cos(bounceAngle + spin) * speed;
+                    ball.vy = Math.sin(bounceAngle + spin) * speed;
+                    
+                    // Move ball away from paddle
+                    const moveDistance = ARENA_RADIUS - PADDLE_HEIGHT - ball.radius - 2;
+                    ball.x = CENTER_X + Math.cos(normal) * moveDistance;
+                    ball.y = CENTER_Y + Math.sin(normal) * moveDistance;
+                    
+                    // Record who hit the ball
+                    ball.lastHitBy = player.id;
+                }
+            }
+        });
+        
+        // If ball didn't hit a paddle and is outside arena, someone scored
+        if (!hitPaddle && distFromCenter > ARENA_RADIUS) {
+            // Find which player's section the ball went through
+            const ballAngle = Math.atan2(ball.y - CENTER_Y, ball.x - CENTER_X);
+            
+            Object.values(gameState.players).forEach(player => {
+                if (isAngleInPlayerSection(ballAngle, player)) {
+                    // This player got scored on
+                    // Give point to last player who hit the ball
+                    if (ball.lastHitBy && ball.lastHitBy !== player.id) {
+                        gameState.scores[ball.lastHitBy]++;
+                    }
+                }
+            });
+            
+            // Reset ball
+            ball.x = CENTER_X;
+            ball.y = CENTER_Y;
+            const randomAngle = Math.random() * Math.PI * 2;
+            ball.vx = Math.cos(randomAngle) * gameSettings.ballSpeed;
+            ball.vy = Math.sin(randomAngle) * gameSettings.ballSpeed;
+            ball.lastHitBy = null;
+        }
     }
 }
 
-// Check collision between ball and paddle
-function checkPaddleCollision(ball, player) {
-    const paddleX = CENTER_X + Math.cos(player.angle) * PADDLE_DISTANCE;
-    const paddleY = CENTER_Y + Math.sin(player.angle) * PADDLE_DISTANCE;
+// Check if angle is in player's section
+function isAngleInPlayerSection(angle, player) {
+    // Normalize angles to 0-2π range
+    let normalizedAngle = angle;
+    let normalizedStart = player.startAngle;
+    let normalizedEnd = player.endAngle;
     
-    // Check if ball is near the paddle's angular position
-    const ballAngle = Math.atan2(ball.y - CENTER_Y, ball.x - CENTER_X);
-    let angleDiff = Math.abs(ballAngle - player.angle);
-    if (angleDiff > Math.PI) angleDiff = Math.PI * 2 - angleDiff;
+    while (normalizedAngle < 0) normalizedAngle += Math.PI * 2;
+    while (normalizedAngle > Math.PI * 2) normalizedAngle -= Math.PI * 2;
+    while (normalizedStart < 0) normalizedStart += Math.PI * 2;
+    while (normalizedEnd < 0) normalizedEnd += Math.PI * 2;
     
-    // Check if ball is at the right distance and angle
-    const distFromCenter = Math.sqrt(Math.pow(ball.x - CENTER_X, 2) + Math.pow(ball.y - CENTER_Y, 2));
-    const paddleAngleWidth = PADDLE_WIDTH / (2 * Math.PI * PADDLE_DISTANCE);
-    
-    return distFromCenter >= PADDLE_DISTANCE - PADDLE_HEIGHT &&
-           distFromCenter <= PADDLE_DISTANCE + PADDLE_HEIGHT &&
-           angleDiff < paddleAngleWidth;
+    if (normalizedEnd < normalizedStart) {
+        // Section crosses 0
+        return normalizedAngle >= normalizedStart || normalizedAngle <= normalizedEnd;
+    } else {
+        return normalizedAngle >= normalizedStart && normalizedAngle <= normalizedEnd;
+    }
+}
+
+// Get paddle angle for a player
+function getPaddleAngle(player) {
+    const sectionAngle = player.endAngle - player.startAngle;
+    const gapAngle = (GAP_SIZE / ARENA_RADIUS);
+    const usableAngle = sectionAngle - gapAngle;
+    return player.startAngle + gapAngle / 2 + (usableAngle * player.paddlePosition);
 }
 
 // Render game
@@ -564,7 +684,45 @@ function render() {
     ctx.arc(CENTER_X, CENTER_Y, ARENA_RADIUS, 0, Math.PI * 2);
     ctx.stroke();
     
-    // Draw countdown if active
+    // Draw player sections and paddles
+    Object.values(gameState.players).forEach(player => {
+        // Draw section boundaries
+        ctx.strokeStyle = player.color + '33';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(CENTER_X, CENTER_Y);
+        ctx.lineTo(
+            CENTER_X + Math.cos(player.startAngle) * ARENA_RADIUS,
+            CENTER_Y + Math.sin(player.startAngle) * ARENA_RADIUS
+        );
+        ctx.stroke();
+        
+        // Draw paddle
+        const paddleAngle = getPaddleAngle(player);
+        const paddleArcLength = gameSettings.paddleWidth / ARENA_RADIUS;
+        
+        ctx.strokeStyle = player.color;
+        ctx.lineWidth = PADDLE_HEIGHT;
+        ctx.beginPath();
+        ctx.arc(
+            CENTER_X, 
+            CENTER_Y, 
+            ARENA_RADIUS, 
+            paddleAngle - paddleArcLength / 2, 
+            paddleAngle + paddleArcLength / 2
+        );
+        ctx.stroke();
+        
+        // Draw gaps at section boundaries
+        const gapAngle = GAP_SIZE / ARENA_RADIUS;
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = PADDLE_HEIGHT + 4;
+        ctx.beginPath();
+        ctx.arc(CENTER_X, CENTER_Y, ARENA_RADIUS, player.startAngle - gapAngle/2, player.startAngle + gapAngle/2);
+        ctx.stroke();
+    });
+    
+    // Draw countdown
     if (gameState.countdown > 0) {
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 72px Arial';
@@ -573,55 +731,39 @@ function render() {
         const countdownNumber = Math.ceil(gameState.countdown);
         ctx.fillText(countdownNumber, CENTER_X, CENTER_Y);
         
-        // Draw "Get Ready!" text
         ctx.font = 'bold 24px Arial';
         ctx.fillText('Get Ready!', CENTER_X, CENTER_Y + 60);
     }
     
-    // Draw paddles
-    Object.values(gameState.players).forEach(player => {
-        const x = CENTER_X + Math.cos(player.angle) * PADDLE_DISTANCE;
-        const y = CENTER_Y + Math.sin(player.angle) * PADDLE_DISTANCE;
-        
-        ctx.save();
-        ctx.translate(x, y);
-        ctx.rotate(player.angle + Math.PI / 2);
-        ctx.fillStyle = player.color;
-        ctx.fillRect(-PADDLE_WIDTH / 2, -PADDLE_HEIGHT / 2, PADDLE_WIDTH, PADDLE_HEIGHT);
-        
-        // Draw player number on paddle
-        ctx.fillStyle = '#000';
-        ctx.font = 'bold 16px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(player.number, 0, 0);
-        
-        ctx.restore();
-        
-        // Draw score near paddle
-        if (gameState.gameStarted) {
-            ctx.fillStyle = player.color;
-            ctx.font = '20px Arial';
-            ctx.textAlign = 'center';
-            const scoreX = CENTER_X + Math.cos(player.angle) * (PADDLE_DISTANCE - 50);
-            const scoreY = CENTER_Y + Math.sin(player.angle) * (PADDLE_DISTANCE - 50);
-            ctx.fillText(player.score || 0, scoreX, scoreY);
-        }
-    });
-    
-    // Draw ball (only if game started)
+    // Draw ball
     if (gameState.gameStarted) {
         ctx.fillStyle = '#fff';
         ctx.beginPath();
         ctx.arc(gameState.ball.x, gameState.ball.y, gameState.ball.radius, 0, Math.PI * 2);
         ctx.fill();
+        
+        // Draw trail
+        if (gameState.ball.lastHitBy) {
+            const player = gameState.players[gameState.ball.lastHitBy];
+            if (player) {
+                ctx.strokeStyle = player.color + '66';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(
+                    gameState.ball.x - gameState.ball.vx * 2,
+                    gameState.ball.y - gameState.ball.vy * 2
+                );
+                ctx.lineTo(gameState.ball.x, gameState.ball.y);
+                ctx.stroke();
+            }
+        }
     }
     
     // Draw controls hint
     ctx.fillStyle = '#666';
     ctx.font = '14px Arial';
     ctx.textAlign = 'center';
-    ctx.fillText('Controls: WASD / Arrow Keys / Mouse', CENTER_X, CANVAS_SIZE - 20);
+    ctx.fillText('Controls: A/D, Arrow Keys, or Mouse', CENTER_X, CANVAS_SIZE - 20);
 }
 
 // Update status message
@@ -649,14 +791,23 @@ document.getElementById('leaveRoom').addEventListener('click', () => {
         ball: {
             x: CENTER_X,
             y: CENTER_Y,
-            vx: BALL_SPEED,
-            vy: BALL_SPEED,
-            radius: BALL_RADIUS
+            vx: 0,
+            vy: 0,
+            radius: BALL_RADIUS,
+            lastHitBy: null
         },
         gameStarted: false,
         countdown: 0,
         countdownStartTime: 0,
-        scores: {}
+        scores: {},
+        winner: null
+    };
+    
+    // Reset settings
+    gameSettings = {
+        pointsToWin: 10,
+        ballSpeed: 5,
+        paddleWidth: 80
     };
     
     // Reset UI
@@ -673,7 +824,8 @@ document.getElementById('leaveRoom').addEventListener('click', () => {
     
     // Reset control state
     keys = {};
-    mouseAngle = null;
+    mouseX = null;
+    mouseY = null;
     useMouseControl = false;
     
     isHost = false;
