@@ -47,25 +47,77 @@ canvas.height = CANVAS_SIZE;
 // Player Colors
 const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F'];
 
-// Initialize PeerJS
-function initializePeer() {
-    peer = new Peer();
+// Create a new room
+document.getElementById('createRoom').addEventListener('click', () => {
+    updateStatus('Creating room...');
+    
+    // Generate a random room code
+    roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    
+    // Initialize peer with the room code as ID
+    peer = new Peer(roomCode);
     
     peer.on('open', (id) => {
         myId = id;
-        updateStatus('Connected to signaling server');
+        isHost = true;
+        playerNumber = 1;
+        addPlayer(myId, playerNumber);
+        showGameRoom();
+        updateStatus('Room created! Share the code with friends.');
     });
     
     peer.on('connection', handleConnection);
     
     peer.on('error', (err) => {
-        updateStatus(`Error: ${err.type}`);
+        updateStatus(`Error: ${err.type} - ${err.message}`);
         console.error(err);
     });
-}
+});
+
+// Join a room
+document.getElementById('joinRoom').addEventListener('click', () => {
+    const code = document.getElementById('joinCode').value.trim().toUpperCase();
+    if (!code) {
+        updateStatus('Please enter a room code');
+        return;
+    }
+    
+    updateStatus('Joining room...');
+    
+    // Create peer with random ID
+    peer = new Peer();
+    
+    peer.on('open', (id) => {
+        myId = id;
+        
+        // Connect to host using room code as peer ID
+        const conn = peer.connect(code);
+        
+        conn.on('open', () => {
+            connections[code] = conn;
+            roomCode = code;
+            setupConnectionHandlers(conn);
+            updateStatus('Connected to room!');
+        });
+        
+        conn.on('error', (err) => {
+            updateStatus('Failed to connect to room - check the code and try again');
+            console.error(err);
+        });
+    });
+    
+    peer.on('connection', handleConnection);
+    
+    peer.on('error', (err) => {
+        updateStatus(`Error: ${err.type} - ${err.message}`);
+        console.error(err);
+    });
+});
 
 // Handle incoming connections
 function handleConnection(conn) {
+    console.log('Incoming connection from:', conn.peer);
+    
     conn.on('open', () => {
         connections[conn.peer] = conn;
         
@@ -91,13 +143,18 @@ function handleConnection(conn) {
                 
                 // Broadcast updated player list
                 broadcastGameState();
+                updatePlayersList();
             } else {
                 conn.send({ type: 'roomFull' });
-                conn.close();
+                setTimeout(() => conn.close(), 100);
             }
         }
         
         setupConnectionHandlers(conn);
+    });
+    
+    conn.on('error', (err) => {
+        console.error('Connection error:', err);
     });
 }
 
@@ -116,6 +173,10 @@ function setupConnectionHandlers(conn) {
                 broadcastGameState();
             }
         }
+    });
+    
+    conn.on('error', (err) => {
+        console.error('Connection error:', err);
     });
 }
 
@@ -147,65 +208,15 @@ function handleMessage(data, senderId) {
             break;
             
         case 'ballUpdate':
-            if (isHost) return; // Only accept ball updates from host
-            gameState.ball = data.ball;
+            if (!isHost) { // Only accept ball updates from host
+                gameState.ball = data.ball;
+            }
             break;
             
         case 'roomFull':
             updateStatus('Room is full!');
             break;
     }
-}
-
-// Create a new room
-document.getElementById('createRoom').addEventListener('click', () => {
-    if (!peer) initializePeer();
-    
-    peer.on('open', (id) => {
-        isHost = true;
-        roomCode = id.substring(0, 8).toUpperCase();
-        playerNumber = 1;
-        addPlayer(myId, playerNumber);
-        showGameRoom();
-        updateStatus('Room created! Share the code with friends.');
-    });
-});
-
-// Join a room
-document.getElementById('joinRoom').addEventListener('click', () => {
-    const code = document.getElementById('joinCode').value.trim();
-    if (!code) {
-        updateStatus('Please enter a room code');
-        return;
-    }
-    
-    if (!peer) initializePeer();
-    
-    peer.on('open', () => {
-        // Find the full peer ID from the code
-        const hostId = findPeerIdFromCode(code);
-        const conn = peer.connect(hostId);
-        
-        conn.on('open', () => {
-            connections[hostId] = conn;
-            roomCode = code;
-            setupConnectionHandlers(conn);
-            updateStatus('Connected to room!');
-        });
-        
-        conn.on('error', (err) => {
-            updateStatus('Failed to connect to room');
-            console.error(err);
-        });
-    });
-});
-
-// Helper function to find peer ID from short code
-function findPeerIdFromCode(code) {
-    // In a real implementation, you might need a simple signaling server
-    // For demo purposes, we'll assume the code is the first 8 chars of the peer ID
-    // You could also use a public STUN server to help with NAT traversal
-    return code.toLowerCase();
 }
 
 // Show game room UI
@@ -472,6 +483,3 @@ document.getElementById('leaveRoom').addEventListener('click', () => {
     
     updateStatus('Left room');
 });
-
-// Initialize the peer connection when page loads
-initializePeer();
